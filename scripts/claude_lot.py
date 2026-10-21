@@ -48,6 +48,8 @@ REGLAGES_DEFAUT = {
     "cinq_heures": "85",
     "semaine": "90",
     "reserve": "95",
+    "rythme": "0",
+    "avance": "5",
     "sonde": "",
     "sonde_delai": "120",
     "journal": "~/.local/state/claude-lot/journal.log",
@@ -143,6 +145,7 @@ def journaliser(reglages: dict, projet: str, evenement: str, detail: str) -> Non
 
 # ---------------------------------------------------------------- mesure
 
+SEMAINE = 604800
 MESURE = re.compile(r"^(\d+) (\d+) (\d{10}) (\d{10})$")
 
 
@@ -205,11 +208,25 @@ def verifier(reglages: dict, prioritaire: bool, projet: str, sujet: str):
         p5 = p7 = int(reglages["reserve"])
     else:
         p5, p7 = int(reglages["cinq_heures"]), int(reglages["semaine"])
-    etat = f"5h={u5}%/{p5}% semaine={u7}%/{p7}% ({origine})"
+    # Rythme (21/10/2026) : la semaine ne se dépense pas plus vite que la ligne régulière
+    # (temps écoulé depuis la remise à zéro / 7 jours x plafond, + avance). Même formule
+    # que la file Vuntum (quota-part.txt). Sans effet pour --prioritaire.
+    ligne = False
+    if not prioritaire and reglages["rythme"] == "1":
+        ecoule = min(100, max(0, (t - (fin7 - SEMAINE)) * 100 // SEMAINE))
+        p7 = min(p7, ecoule * p7 // 100 + int(reglages["avance"]))
+        ligne = True
+    etat = f"5h={u5}%/{p5}% semaine={u7}%/{p7}%{' (ligne régulière)' if ligne else ''} ({origine})"
     if u5 >= p5 or u7 >= p7:
         fin = fin5 if u5 >= p5 else fin7
-        reprise = datetime.fromtimestamp(fin).astimezone().strftime("%d/%m %H:%M")
         quoi = "la fenêtre de 5 h" if u5 >= p5 else "la semaine"
+        if ligne and u5 < p5 and u7 < int(reglages["semaine"]):
+            # La ligne rattrape l'usage : fraction de semaine à attendre pour que repère > usage.
+            quoi = "la ligne régulière de la semaine"
+            plafond, avance = int(reglages["semaine"]), int(reglages["avance"])
+            besoin = -(-(u7 - avance + 1) * 100 // plafond)
+            fin = fin7 - SEMAINE + -(-besoin * SEMAINE // 100)
+        reprise = datetime.fromtimestamp(fin).astimezone().strftime("%d/%m %H:%M")
         journaliser(reglages, projet, "refus", f"{etat} sujet={sujet[:60]!r}")
         return False, (f"plafond commun atteint sur {quoi} ({etat}), rien lancé ; "
                        f"reprise possible après le {reprise}")

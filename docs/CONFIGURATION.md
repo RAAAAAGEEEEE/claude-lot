@@ -8,6 +8,8 @@ Fichier lu : `--conf`, sinon `$CLAUDE_LOT_CONF`, sinon `/etc/claude-lot.conf`. U
 | `cinq_heures` | 85 | plafond de la fenêtre de 5 h, en % |
 | `semaine` | 90 | plafond de la semaine, en % |
 | `reserve` | 95 | plafond des lots `--prioritaire`, pour les deux fenêtres |
+| `rythme` | 0 | `1` : hors `--prioritaire`, la semaine ne dépasse pas la ligne régulière (temps écoulé depuis la remise à zéro / 7 jours x `semaine`, plus `avance`, jamais plus que `semaine`) |
+| `avance` | 5 | points d'avance sur la ligne régulière (avec `rythme=1`) |
 | `sonde` | (vide) | commande de mesure ; vide = aucune mesure |
 | `sonde_delai` | 120 | délai maximal de la sonde, en secondes |
 | `mesure_impossible` | `lancer` | `lancer` ou `refuser` quand aucune mesure n'est utilisable |

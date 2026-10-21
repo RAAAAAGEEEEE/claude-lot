@@ -143,6 +143,46 @@ class Plafond(unittest.TestCase):
         self.poser(95, 10)
         self.assertEqual(self.lancer("--verifier", "--prioritaire")[0], 75)
 
+    def regler_rythme(self, avance=5):
+        self.conf.write_text(self.conf.read_text() + f"rythme=1\navance={avance}\n")
+
+    def test_rythme_refuse_au_dessus_de_la_ligne_reguliere(self):
+        self.regler_rythme()
+        # mi-semaine : ligne = 50 x 90 / 100 + 5 = 50
+        fin7 = self.t + 302400
+        self.poser(50, 10, fin7=fin7)
+        code, _, err = self.lancer("--verifier", "--projet", "jeu")
+        self.assertEqual(code, claude_lot.CODE_REFUS)
+        self.assertIn("ligne régulière", err)
+        self.assertIn("semaine=50%/50%", err)
+        self.poser(49, 10, fin7=fin7)
+        code, out, _ = self.lancer("--verifier")
+        self.assertEqual(code, 0)
+        self.assertIn("semaine=49%/50%", out)
+
+    def test_rythme_ne_depasse_jamais_le_plafond_de_la_semaine(self):
+        self.regler_rythme(avance=50)
+        self.poser(89, 10, fin7=self.t + 3600)
+        self.assertEqual(self.lancer("--verifier")[0], 0)
+        self.poser(90, 10, fin7=self.t + 3600)
+        self.assertEqual(self.lancer("--verifier")[0], 75)
+
+    def test_rythme_ne_touche_pas_au_prioritaire(self):
+        self.regler_rythme()
+        self.poser(60, 10, fin7=self.t + 302400)
+        self.assertEqual(self.lancer("--verifier")[0], 75)
+        self.assertEqual(self.lancer("--verifier", "--prioritaire")[0], 0)
+
+    def test_rythme_absent_ou_nul_garde_l_ancien_comportement(self):
+        self.poser(60, 10, fin7=self.t + 302400)
+        self.assertEqual(self.lancer("--verifier")[0], 0)
+
+    def test_rythme_annonce_la_reprise_quand_la_ligne_rattrape(self):
+        self.regler_rythme()
+        self.poser(60, 10, fin7=self.t + 302400)
+        _, _, err = self.lancer("--verifier")
+        self.assertIn("reprise possible après le", err)
+
     def test_fenetre_terminee_repart_a_zero(self):
         self.poser(21, 123, fin5=self.t - 60)
         self.assertEqual(self.lancer("--verifier")[0], 0)
