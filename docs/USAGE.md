@@ -13,6 +13,9 @@ Options : `--projet NOM` (journal), `--sujet "..."`, `--sujet-fichier brief.md`,
 
 Codes : 0 succès, 64 erreur d'usage (brief illisible, rien à lancer), 75 plafond atteint.
 
+Cinquième mode : `claude-lot file ajouter|lister|retirer|tourner`, la file de tâches
+([FILE.md](FILE.md)). Mêmes codes (0, 64, 75), plus 1 quand le lanceur d'une tâche échoue.
+
 ## Plafond
 
 La sonde rend l'utilisation de la semaine et de la fenêtre de 5 h, avec leurs heures de fin.

@@ -8,17 +8,20 @@ description: >
   type de tâche (Sonnet medium par défaut, Sonnet high pour l'extraction et le texte publié
   factuel, Opus medium pour l'architecture, la sécurité, la contre-revue et la vérification
   factuelle, Haiku low pour les mesures et le gros volume simple), avec un champ `modele:`
-  explicite qui l'emporte. À utiliser quand l'utilisateur dit « mes scripts claude -p épuisent
+  explicite qui l'emporte. File de tâches (`claude-lot file`) pour répartir les gros chantiers sur
+  la semaine (N par jour, un à la fois, sous la ligne régulière du quota, remise en tête si limite
+  d'usage). À utiliser quand l'utilisateur dit « mes scripts claude -p épuisent
   mon quota », « un projet a bloqué tous les autres », « plafond commun », « choisir le modèle
-  automatiquement pour mes tâches de fond », ou en anglais « shared usage cap for headless
-  Claude Code jobs », « pick the model per task automatically ». N'affiche jamais de secret.
+  automatiquement pour mes tâches de fond », « étaler mes gros chantiers claude -p sur la semaine »,
+  ou en anglais « shared usage cap for headless Claude Code jobs », « pick the model per task
+  automatically », « spread big claude -p jobs over the week ». N'affiche jamais de secret.
 license: MIT
 compatibility: >
   Claude Code 2.1 ou plus récent, abonnement Claude (sonde observée sur Max). Python 3.9+ (bibliothèque standard
   seulement). Sonde fournie : bash et jq. Linux et macOS ; sous Windows, lancer depuis WSL.
 metadata:
   author: Anto1nx
-  version: "1.0.0"
+  version: "1.1.0"
   repository: https://github.com/RAAAAAGEEEEE/claude-lot
 allowed-tools: Read Edit Bash(python3:*) Bash(crontab -l) Bash(claude-lot:*)
 ---
@@ -83,6 +86,30 @@ Montrer : les lignes modifiées (diff), un refus provoqué avec un plafond abais
 de la configuration (`--conf`), le choix du modèle sur trois sujets réels (`claude-lot --choisir`),
 et la dernière ligne du journal.
 
+### 5. File de tâches (si l'utilisateur veut étaler de gros chantiers)
+
+Seulement sur demande : « étaler », « un chantier par jour », « file d'attente ». Périmètre : la file
+range et lance des tâches ; elle n'écrit pas les briefs et ne décide pas de leur contenu.
+
+1. Demander (une fois) : combien de tâches par jour au plus, et quel programme exécute une tâche.
+   S'il n'existe pas, partir de `examples/lanceur-exemple.sh` (brief `<tache>.md` + `claude-lot`).
+2. Ajouter les lignes `file*` à la configuration (sauvegarde horodatée d'abord) :
+   `file`, `file_max_par_jour`, `file_lanceur` (obligatoire), éventuellement `file_garde`.
+3. Essayer : `claude-lot file ajouter ma_tache`, `claude-lot file lister`,
+   `claude-lot file tourner --a-blanc` (rien n'est lancé, la file n'est pas modifiée).
+4. Proposer la ligne de cron de `examples/crontab-file.txt` et l'ajouter seulement avec l'accord de
+   l'utilisateur, après `crontab -l > crontab.bak-...`.
+
+Règles : le nom de tâche reste `^[a-z0-9_]+$` (jamais de commande dans une ligne de file) ; ne jamais
+lancer `tourner` sans `--a-blanc` pour « tester » (cela lance vraiment une tâche, donc consomme du
+quota) ; un code 75 est un report, pas une erreur. Détail : [docs/FILE.md](docs/FILE.md).
+
+Exemple de sortie attendue de l'étape 3 :
+
+```text
+à blanc : lancerait ma_tache (ligne : modèle auto, effort auto ; choix de la table : claude-sonnet-5-5 medium, défaut) ; 5h=10%/85% semaine=10%/34% (ligne régulière) (sonde) ; 1/2 aujourd'hui
+```
+
 ## Table de choix du modèle
 
 Première règle reconnue dans le sujet (`--sujet`, plus le titre `# ...` du brief donné par
@@ -102,4 +129,5 @@ Première règle reconnue dans le sujet (`--sujet`, plus le titre `# ...` du bri
 
 - Ne jamais afficher un jeton, une clé ou le contenu d'un fichier d'identifiants.
 - Ne jamais couper un lot déjà lancé : `claude-lot` décide seulement au démarrage.
+- Ne jamais mettre dans la file une commande, un chemin ou un argument : seulement un nom de tâche.
 - Ne pas brancher les sessions interactives : la réserve leur est destinée.

@@ -1,5 +1,6 @@
 """Structure du skill : fichiers attendus, versions concordantes, rien de privé."""
 
+import os
 import re
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ class Structure(unittest.TestCase):
     def test_fichiers_presents(self):
         for f in ("SKILL.md", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md",
                   "scripts/claude_lot.py", "scripts/sonde-quota.sh", "examples/claude-lot.conf",
+                  "examples/lanceur-exemple.sh", "examples/crontab-file.txt", "docs/FILE.md",
                   "docs/INSTALLATION.md", "docs/USAGE.md", "docs/CONFIGURATION.md", "docs/ARCHITECTURE.md",
                   "docs/LIMITATIONS.md", "docs/TROUBLESHOOTING.md", "docs/PRIVACY_AND_SECURITY.md"):
             with self.subTest(f=f):
@@ -30,7 +32,12 @@ class Structure(unittest.TestCase):
         self.assertEqual(skill, journal)
 
     def test_aucun_chemin_ni_adresse_privee(self):
-        interdits = re.compile(r"/root/|@gmail|@[a-z0-9-]+\.(com|fr)\b|sk-ant-|oauth_token", re.I)
+        interdits = re.compile(r"/root/|/mnt/|@gmail|@[a-z0-9-]+\.(com|fr)\b|sk-ant-|oauth_token", re.I)
+        # Mots propres à un site ou à un projet : jamais dans le dépôt, donc fournis par l'environnement
+        # (CLAUDE_LOT_MOTS_INTERDITS="mot1|mot2"), pas écrits ici.
+        prives = os.environ.get("CLAUDE_LOT_MOTS_INTERDITS")
+        if prives:
+            interdits = re.compile(interdits.pattern + "|" + prives, re.I)
         for f in RACINE.rglob("*"):
             if f.is_file() and ".git" not in f.parts and f.suffix in (".md", ".py", ".sh", ".conf", ".yml", ""):
                 if f.name == "test_skill_structure.py":

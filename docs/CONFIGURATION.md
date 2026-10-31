@@ -18,6 +18,21 @@ Fichier lu : `--conf`, sinon `$CLAUDE_LOT_CONF`, sinon `/etc/claude-lot.conf`. U
 | `registre` | `~/.claude/modeles.json` | identifiants des modèles (facultatif) |
 | `commande` | `claude` | programme lancé (`$CLAUDE_LOT_COMMANDE` l'emporte, utile en test) |
 
+## File de tâches
+
+Réglages de `claude-lot file` (détail : [FILE.md](FILE.md)). Les autres réglages (plafonds,
+sonde, journal) s'appliquent aussi à la file.
+
+| Clé | Défaut | Rôle |
+|---|---|---|
+| `file` | `~/.local/state/claude-lot/file.txt` | fichier de file, une ligne `tache[:modele[:effort]]` |
+| `file_max_par_jour` | 2 | lancements au plus par jour local |
+| `file_lanceur` | (vide, obligatoire) | programme appelé avec `<tache> <modele ou auto> <effort ou vide>` ; code 0 fait, 75 limite d'usage (remise en tête), autre échec |
+| `file_garde` | (vide) | contrôle facultatif appelé avec `<tache>` ; code autre que 0 : la file s'abstient |
+| `file_delai` | 21600 | durée maximale d'une tâche en secondes (entier positif ou nul), 0 = illimitée |
+| `file_rythme` | 1 | `1` : la ligne régulière de la semaine s'applique à la file, quel que soit `rythme` |
+| `file_mesure_impossible` | `refuser` | `refuser` ou `lancer` sans mesure de quota (distinct de `mesure_impossible`) |
+
 ## Sonde
 
 N'importe quelle commande qui affiche, sur sa dernière ligne :

@@ -6,8 +6,13 @@ a machine: before starting, it reads the real subscription usage (5-hour window 
 refuses to start above a common cap (85 % / 90 % by default, exit code 75, one log line), keeping
 the rest for priority work and interactive sessions. It also picks the model and effort from the
 task subject (Sonnet medium by default, Opus for architecture, security, review and fact-checking,
-Haiku for measurements and bulk work), with an explicit `modele:` field that always wins. Python
-standard library only, no secret ever printed. Documentation is in French.
+Haiku for measurements and bulk work), with an explicit `modele:` field that always wins. Since 1.1.0
+a task queue (`claude-lot file`) spreads big jobs over the week: at most N per day, one at a time,
+each only when the shared cap and the weekly pace line allow it, with any launcher you plug in.
+Python standard library only, no secret ever printed. Documentation is in French.
+
+Statut : stable (1.1.0). Public visé : qui fait tourner `claude -p` depuis cron ou des scripts, sur un
+abonnement Claude, seul ou à plusieurs projets.
 
 Lanceur commun des travaux en lot de Claude Code : **un plafond de quota partagé par tous les
 projets** d'une machine, et **le bon modèle choisi automatiquement** selon la tâche.
@@ -29,6 +34,10 @@ choisit son modèle à la main, souvent le plus cher « par sécurité ».
   libère, une ligne dans le journal.
 - **Le choix du modèle et de l'effort** d'après le sujet de la tâche, avec un champ explicite qui
   l'emporte. Un `--model` déjà présent dans la commande est respecté.
+- **Une file de tâches** (`claude-lot file`) : les gros chantiers sont lancés au fil de la semaine,
+  au plus N par jour, un à la fois, sous la ligne régulière de la semaine ; une tâche arrêtée par
+  la limite d'usage revient en tête. Le programme qui exécute la tâche est un réglage.
+  Détail : [docs/FILE.md](docs/FILE.md).
 - **Une sonde** qui lit l'utilisation réelle de l'abonnement, gardée en cache 15 minutes.
 - **Un skill** (`SKILL.md`) : Claude fait l'inventaire des lanceurs, installe, branche avec
   sauvegardes et montre la preuve.
@@ -60,6 +69,18 @@ Dans une crontab, pour un lot dont on ne veut pas modifier le code :
 17 2 * * * claude-lot --verifier --projet site >/dev/null 2>&1 && /chemin/lot_de_nuit.sh
 ```
 
+File de tâches, en bref (exemple complet dans [docs/FILE.md](docs/FILE.md)) :
+
+```bash
+claude-lot file ajouter audit_securite_api           # une ligne dans la file
+claude-lot file lister
+claude-lot file tourner --a-blanc                    # montre ce qui partirait, ne lance rien
+```
+
+```cron
+17 8-20/2 * * *  claude-lot file tourner >/dev/null 2>&1
+```
+
 ## Choix du modèle
 
 | Sujet de la tâche | Modèle | Effort |
@@ -78,6 +99,7 @@ générales (« attention à la sécurité ») qui enverraient tout sur Opus. Ra
 
 - [Installation](docs/INSTALLATION.md)
 - [Utilisation](docs/USAGE.md)
+- [File de tâches](docs/FILE.md)
 - [Configuration](docs/CONFIGURATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Limites](docs/LIMITATIONS.md)
@@ -90,7 +112,14 @@ générales (« attention à la sécurité ») qui enverraient tout sur Opus. Ra
 python3 -m unittest discover -s tests -v
 ```
 
-Aucun appel réseau : la sonde et `claude` sont remplacés par de faux programmes.
+Aucun appel réseau : la sonde, `claude` et le lanceur de la file sont remplacés par de faux programmes.
+
+## Limites et suite
+
+Le plafond n'est contrôlé qu'au démarrage, la sonde repose sur un événement non documenté de Claude
+Code, la file ne reprend pas une tâche tuée en cours de route : tout est dans
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md). Suite envisagée, sans engagement : un tri automatique d'une
+boîte de notes vers la file, une mesure du coût réel par tâche.
 
 ## Licence
 

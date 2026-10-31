@@ -34,6 +34,11 @@ sudo cp examples/claude-lot.conf /etc/claude-lot.conf     # emplacement lu par d
 Dans `/etc/claude-lot.conf`, mettez un chemin absolu pour `sonde`, `journal` et `etat` : cron ne
 part pas toujours du même dossier personnel.
 
+## Pour la file de tâches
+
+Aucune installation de plus : `claude-lot file ...` est dans le même fichier. Renseigner
+`file_lanceur` et programmer la crontab : [FILE.md](FILE.md).
+
 ## Vérifier
 
 ```bash

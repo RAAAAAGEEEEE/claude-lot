@@ -1,0 +1,9 @@
+# Exemple de crontab pour la file de tâches de claude-lot (crontab -e).
+# Une tentative toutes les 2 heures, en journée : au plus file_max_par_jour tâches partent, une à la
+# fois, et seulement si le quota le permet. Un refus (code 75) n'est pas une erreur : on le tait ;
+# le journal de claude-lot (réglage « journal ») garde la trace de chaque lancement et abstention.
+# Chemins absolus : cron ne résout ni ~ ni le PATH habituel.
+CLAUDE_LOT_CONF=/etc/claude-lot.conf
+PATH=/usr/local/bin:/usr/bin:/bin
+
+17 8-20/2 * * *  claude-lot file tourner >/dev/null 2>&1
