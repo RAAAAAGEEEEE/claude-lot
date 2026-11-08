@@ -727,6 +727,96 @@ def analyser(argv):
     return a
 
 
+SCOPE_LOT = re.compile(r"^(/.*)?/tachesclaude\.slice/(tache-claude-\d+\.scope)$")
+
+
+def scope_de(pid: int):
+    """Chemin cgroup du scope de lot (tache-plafonnee) où vit ce processus, sinon None.
+    Tout autre cgroup (service, session, cron) est ignoré : on ne le touche jamais."""
+    try:
+        for ligne in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
+            if ligne.startswith("0::"):
+                chemin = ligne[3:].strip()
+                return chemin if SCOPE_LOT.match(chemin) else None
+    except OSError:
+        pass
+    return None
+
+
+def pids_du_scope(scope: str) -> list:
+    racine = os.environ.get("CLAUDE_LOT_CGROUP_RACINE", "/sys/fs/cgroup")
+    try:
+        texte = Path(racine + scope + "/cgroup.procs").read_text()
+    except OSError:
+        return []
+    return [int(p) for p in texte.split() if p.isdigit() and int(p) != os.getpid()]
+
+
+def nettoyer_scope(reglages: dict, projet: str, scope: str, delai: int = 30) -> None:
+    """Fin du processus claude principal : termine ce qui reste dans le scope de CE lot
+    (TERM, puis KILL après `delai` s) et journalise. Ne touche à aucun autre cgroup."""
+    import signal
+    restes = pids_du_scope(scope)
+    if not restes:
+        return
+
+    def cmd(p):
+        try:
+            return Path(f"/proc/{p}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()[:80]
+        except OSError:
+            return "?"
+    decrit = {p: cmd(p) for p in restes}
+    for p in restes:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    fin = time.time() + delai
+    while time.time() < fin and pids_du_scope(scope):
+        time.sleep(0.5)
+    tues = []
+    for p in pids_du_scope(scope):
+        try:
+            os.kill(p, signal.SIGKILL)
+            tues.append(p)
+        except OSError:
+            pass
+    nom = scope.rsplit("/", 1)[-1]
+    journaliser(reglages, projet, "scope-nettoye",
+                f"scope={nom} termines={len(restes)} kill={len(tues)} "
+                + " ".join(f"{p}:{decrit[p]!r}" for p in restes))
+
+
+def executer_lot(reglages: dict, projet: str, commande: list) -> int:
+    """Lance claude en processus fils (au lieu d'exec), attend sa fin, puis nettoie le scope du lot."""
+    import signal
+    proc = subprocess.Popen(commande)
+    scope = None
+
+    def relayer(signum, _frame):
+        try:
+            proc.send_signal(signum)
+        except OSError:
+            pass
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, relayer)
+    while True:
+        try:
+            code = proc.wait(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            if scope is None:
+                scope = scope_de(proc.pid)
+    if scope is not None:
+        try:
+            nettoyer_scope(reglages, projet, scope)
+        except Exception as e:  # le nettoyage ne doit jamais changer le code de sortie du lot
+            journaliser(reglages, projet, "scope-erreur", repr(e)[:200])
+    return code if code >= 0 else 128 - code
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "file":
@@ -773,8 +863,7 @@ def main(argv=None) -> int:
     journaliser(reglages, a.projet, "lancement",
                 f"{message} modele={modele if '--model' not in a.args else 'commande'} effort={effort} ({raison}) sujet={sujet[:60]!r}")
     sys.stdout.flush()
-    os.execvp(commande[0], commande + ajout + a.args)
-    return 0  # jamais atteint
+    return executer_lot(reglages, a.projet, commande + ajout + a.args)
 
 
 if __name__ == "__main__":
