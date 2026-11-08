@@ -1,0 +1,11 @@
+# Survivants autorisés de claude-lot et de garde-scopes-lot : un motif (expression régulière Python,
+# recherchée dans la ligne de commande) par ligne. Un processus dont la ligne de commande, ou celle
+# d'un de ses ancêtres, correspond à un motif n'est jamais arrêté à la fin d'un lot.
+# Ce sont des lancements détachés faits exprès depuis une tâche Claude (setsid nohup).
+/root/vuntum-tasks/deployer\.sh
+# file Vuntum : voies, relais, revues (file.sh lance ses voies avec setsid nohup)
+/root/vuntum-tasks/file\.sh
+/root/vuntum-tasks/lancer-voie\.sh
+/root/vuntum-tasks/estimer-autonome\.py
+# audit SEO hebdomadaire : collecte relancée en fond
+/root/vuntum-tasks/audit-seo-hebdo/collecte\.sh

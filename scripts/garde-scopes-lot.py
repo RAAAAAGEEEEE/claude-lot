@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""garde-scopes-lot : zéro token, arrête tout scope de lot (tache-claude-*.scope) sans processus
+"""garde-scopes-lot : zéro token, nettoie tout scope de lot (tache-claude-*.scope) sans processus
 `claude` depuis plus de 2 h, et l'écrit dans la section « Incidents » de la boîte du pilote.
 
 Filet de secours de `claude-lot` (qui nettoie déjà le scope à la fin du lot) : couvre un lot dont
 le lanceur est mort sans nettoyer. Ne touche qu'aux unités `tache-claude-<n>.scope` de la slice
 `tachesclaude.slice`, jamais un service ni un autre scope.
+
+Les survivants autorisés (scripts/survivants.txt) et leurs descendants sont épargnés : seuls
+les autres processus du scope sont arrêtés (TERM puis KILL après 30 s), jamais `systemctl stop`.
 
 Usage : garde-scopes-lot.py [--essai]   (--essai : n'arrête rien, n'écrit rien, affiche)
 Réglages par variables d'environnement (tests) : GARDE_ETAT, GARDE_INBOX, GARDE_CGROUP, GARDE_DELAI.
@@ -12,6 +15,7 @@ Réglages par variables d'environnement (tests) : GARDE_ETAT, GARDE_INBOX, GARDE
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -53,6 +57,39 @@ def unites() -> list:
         return []
 
 
+SURVIVANTS = os.environ.get("CLAUDE_LOT_SURVIVANTS", "/root/projects/claude-lot/scripts/survivants.txt")
+
+
+def epargnes(membres: list) -> set:
+    """Pids dont la ligne de commande, ou celle d'un ancêtre, correspond à un survivant autorisé."""
+    try:
+        motifs = [re.compile(l.strip()) for l in Path(SURVIVANTS).read_text(encoding="utf-8").splitlines()
+                  if l.strip() and not l.lstrip().startswith("#")]
+    except (OSError, re.error):
+        motifs = []
+
+    def ligne(p):
+        try:
+            return Path(f"/proc/{p}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            return ""
+
+    def parent(p):
+        try:
+            return int(Path(f"/proc/{p}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return 0
+    sauves = set()
+    for p in membres:
+        q, n = p, 0
+        while q > 1 and n < 64:
+            if any(m.search(ligne(q)) for m in motifs):
+                sauves.add(p)
+                break
+            q, n = parent(q), n + 1
+    return sauves
+
+
 def incident(texte: str) -> None:
     ligne = f"- {datetime.now().astimezone().strftime('%d/%m/%Y %H:%M')} (Paris) garde-scopes-lot : {texte}\n"
     lignes = INBOX.read_text(encoding="utf-8").splitlines(keepends=True) if INBOX.exists() else ["## Incidents\n"]
@@ -79,6 +116,10 @@ def main() -> int:
         membres = pids(unite)
         if not membres or any(comm(p) == "claude" for p in membres):
             continue  # vide (il disparaîtra seul) ou lot vivant
+        sauves = epargnes(membres)
+        membres = [p for p in membres if p not in sauves]
+        if not membres:
+            continue  # ne reste que des survivants autorisés
         depuis = etat.get(unite, maintenant)
         nouveau[unite] = depuis
         if maintenant - depuis < DELAI:
@@ -87,9 +128,20 @@ def main() -> int:
         if essai:
             print(f"A ARRETER {unite} sans claude depuis {(maintenant - depuis) // 60} min : {resume}")
             continue
-        r = subprocess.run(["systemctl", "stop", unite], capture_output=True, text=True, timeout=120)
-        incident(f"scope {unite} arrêté (aucun processus claude depuis {(maintenant - depuis) // 3600} h, "
-                 f"{len(membres)} processus : {resume}) code={r.returncode}")
+        for p in membres:
+            try:
+                os.kill(p, signal.SIGTERM)
+            except OSError:
+                pass
+        time.sleep(30)
+        for p in pids(unite):
+            if p in membres:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+        incident(f"scope {unite} nettoyé (aucun processus claude depuis {(maintenant - depuis) // 3600} h, "
+                 f"{len(membres)} processus arrêtés, survivants autorisés épargnés : {len(sauves)} : {resume})")
         nouveau.pop(unite, None)
     if not essai:
         ETAT.parent.mkdir(parents=True, exist_ok=True)

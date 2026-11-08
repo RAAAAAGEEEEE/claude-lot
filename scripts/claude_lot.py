@@ -752,11 +752,50 @@ def pids_du_scope(scope: str) -> list:
     return [int(p) for p in texte.split() if p.isdigit() and int(p) != os.getpid()]
 
 
+SURVIVANTS = os.environ.get("CLAUDE_LOT_SURVIVANTS", "/root/projects/claude-lot/scripts/survivants.txt")
+
+
+def motifs_survivants() -> list:
+    try:
+        return [re.compile(l.strip()) for l in Path(SURVIVANTS).read_text(encoding="utf-8").splitlines()
+                if l.strip() and not l.lstrip().startswith("#")]
+    except (OSError, re.error):
+        return []
+
+
+def epargnes(pids: list) -> set:
+    """Pids dont la ligne de commande, ou celle d'un ancêtre, correspond à un survivant autorisé."""
+    motifs = motifs_survivants()
+
+    def ligne(p):
+        try:
+            return Path(f"/proc/{p}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            return ""
+
+    def parent(p):
+        try:
+            return int(Path(f"/proc/{p}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return 0
+    sauves = set()
+    for p in pids:
+        q, n = p, 0
+        while q > 1 and n < 64:
+            if any(m.search(ligne(q)) for m in motifs):
+                sauves.add(p)
+                break
+            q, n = parent(q), n + 1
+    return sauves
+
+
 def nettoyer_scope(reglages: dict, projet: str, scope: str, delai: int = 30) -> None:
     """Fin du processus claude principal : termine ce qui reste dans le scope de CE lot
     (TERM, puis KILL après `delai` s) et journalise. Ne touche à aucun autre cgroup."""
     import signal
     restes = pids_du_scope(scope)
+    sauves = epargnes(restes)
+    restes = [p for p in restes if p not in sauves]
     if not restes:
         return
 
@@ -772,10 +811,12 @@ def nettoyer_scope(reglages: dict, projet: str, scope: str, delai: int = 30) -> 
         except OSError:
             pass
     fin = time.time() + delai
-    while time.time() < fin and pids_du_scope(scope):
+    def restants():
+        return [p for p in pids_du_scope(scope) if p in decrit]
+    while time.time() < fin and restants():
         time.sleep(0.5)
     tues = []
-    for p in pids_du_scope(scope):
+    for p in restants():
         try:
             os.kill(p, signal.SIGKILL)
             tues.append(p)
