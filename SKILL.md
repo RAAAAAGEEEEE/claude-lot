@@ -21,7 +21,7 @@ compatibility: >
   seulement). Sonde fournie : bash et jq. Linux et macOS ; sous Windows, lancer depuis WSL.
 metadata:
   author: Anto1nx
-  version: "1.1.0"
+  version: "1.2.0"
   repository: https://github.com/RAAAAAGEEEEE/claude-lot
 allowed-tools: Read Edit Bash(python3:*) Bash(crontab -l) Bash(claude-lot:*)
 ---

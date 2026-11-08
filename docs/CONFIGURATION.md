@@ -17,6 +17,15 @@ Fichier lu : `--conf`, sinon `$CLAUDE_LOT_CONF`, sinon `/etc/claude-lot.conf`. U
 | `etat` | `~/.local/state/claude-lot/derniere-mesure` | dernière mesure valable |
 | `registre` | `~/.claude/modeles.json` | identifiants des modèles (facultatif) |
 | `commande` | `claude` | programme lancé (`$CLAUDE_LOT_COMMANDE` l'emporte, utile en test) |
+| `refus` | `~/.local/state/claude-lot/refus.txt` | refus d'usage constaté : `<fin epoch> <type> <source> <date>` ; tant que la fin n'est pas passée, aucun lot ne démarre (même `--prioritaire`) ; vide = pas de suivi |
+| `strict_mcp` | 1 | `1` : `--strict-mcp-config` ajouté à chaque lancement (aucun serveur MCP, sauf `--mcp-config` explicite) |
+| `survivants` | `survivants.txt` à côté du script | motifs des processus épargnés au nettoyage du scope (`$CLAUDE_LOT_SURVIVANTS` l'emporte) |
+| `sans_rythme` | (vide) | projets exemptés de la ligne régulière, séparés par des virgules |
+| `presence_projets` | (vide) | projets soumis à la règle de présence (outil `presence`) |
+| `presence` | `/usr/local/bin/presence-antoine` | commande qui affiche `present` ou `absent` ; muette = aucun effet |
+| `avance_absent`, `cinq_heures_absent`, `cinq_heures_present` | (vide) | absent : avance en plus et plafond 5 h ; présent : plafond 5 h au plus |
+| `turbo` | (vide) | fichier dont la présence lève le plafond « présent » (`CLAUDE_LOT_TURBO=1` aussi) |
+| `ligne_horaire` | (vide) | commande `<outil> ligne <début> <fin> --a <t>` qui rend la part pondérée de la semaine écoulée en millièmes ; vide = ligne droite |
 
 ## File de tâches
 
@@ -41,7 +50,11 @@ N'importe quelle commande qui affiche, sur sa dernière ligne :
 <% semaine> <% fenêtre de 5 h> <fin de la semaine, epoch> <fin de la fenêtre de 5 h, epoch>
 ```
 
-par exemple `21 64 1793041200 1792479600`, et sort en code 0. `scripts/sonde-quota.sh` le fait
+par exemple `21 64 1793041200 1792479600`, et sort en code 0. Le deuxième champ peut valoir
+`inconnu` quand la sonde ne connaît pas la fenêtre de 5 h (jamais 0 à sa place) : le plafond de
+5 h ne s'applique pas, les refus constatés (réglage `refus`) prennent le relais. claude-lot appelle
+la sonde avec `QUOTA_FORMAT=etendu` dans l'environnement, pour qu'une sonde qui garde un format
+strictement numérique pour d'autres lecteurs sache qu'elle peut écrire `inconnu`. `scripts/sonde-quota.sh` le fait
 avec Claude Code lui-même ; ses variables : `CLAUDE_LOT_SONDE_CACHE` (secondes, 900),
 `CLAUDE_LOT_SONDE_FICHIER` (cache), `CLAUDE_LOT_SONDE_MODELE` (`claude-haiku-5-5`).
 

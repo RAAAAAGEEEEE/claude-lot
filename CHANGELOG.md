@@ -3,6 +3,28 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 Versions selon [SemVer](https://semver.org/lang/fr/).
 
+## [1.2.0] - 2026-11-08
+
+### Corrigé
+- Fenêtre de 5 h absente de l'événement `rate_limit_event` (constaté depuis le 06/11/2026 : seule
+  `seven_day` reste, l'API d'usage renvoie `five_hour: null`) : la sonde écrit `inconnu`, jamais 0 ;
+  claude-lot l'affiche `5h=inconnu` et n'applique plus de plafond de 5 h sur une valeur inventée.
+- Version installée et dépôt réunis : les réglages présence, turbo, `ligne_horaire`, `sans_rythme`, la
+  pause disque et l'effort des sous-agents (`--settings`) vivaient seulement dans la copie installée.
+- Plus aucun chemin privé dans `scripts/` (survivants : réglage `survivants`, sinon fichier voisin).
+
+### Ajouté
+- Refus d'usage constatés : à la fin d'un lot, un résultat en erreur 429 ou « hit your … limit »
+  (avec code non nul) est noté dans `refus` avec l'heure de reprise annoncée (événement `rejected`,
+  sinon texte « resets 9:50pm (Europe/Paris) », sinon 30 min) ; aucun lot ne démarre avant.
+  `claude-lot refus noter|etat` pour les autres lanceurs et la sonde.
+- Ligne `fin-lot` au journal : durée, code de sortie, coût (`total_cost_usd` des sorties json et
+  stream-json, sinon `inconnu`). Les sorties du lot sont recopiées sans tampon (pas de changement
+  pour l'appelant) ; un terminal reste branché directement.
+- `--strict-mcp-config` ajouté à chaque lancement (réglage `strict_mcp`, 1 par défaut).
+- `scripts/installer.sh` : installe depuis le dernier commit, refuse si la copie installée diffère du
+  commit installé précédemment.
+
 ## [1.1.0] - 2026-11-01
 
 ### Ajouté

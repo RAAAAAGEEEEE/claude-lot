@@ -34,6 +34,14 @@ sudo cp examples/claude-lot.conf /etc/claude-lot.conf     # emplacement lu par d
 Dans `/etc/claude-lot.conf`, mettez un chemin absolu pour `sonde`, `journal` et `etat` : cron ne
 part pas toujours du même dossier personnel.
 
+Mises à jour suivantes : `sudo scripts/installer.sh`. Il installe le dernier commit (jamais la copie
+de travail), lance les tests, sauvegarde la copie installée (`.bak-<date ISO>`) et refuse si cette
+copie a été modifiée depuis le commit installé la fois précédente (état dans
+`/var/lib/claude-lot/installe.txt`) : une retouche faite directement dans `/usr/local/bin` se
+reporte d'abord dans le dépôt. Première installation suivie d'une copie existante : `--adopter`,
+après avoir vérifié qu'elle est entièrement fusionnée. Mettez aussi `survivants` en chemin absolu
+si vous utilisez le nettoyage de scope : la copie installée n'a pas `survivants.txt` à côté d'elle.
+
 ## Pour la file de tâches
 
 Aucune installation de plus : `claude-lot file ...` est dans le même fichier. Renseigner

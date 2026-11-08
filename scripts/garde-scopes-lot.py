@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 ETAT = Path(os.environ.get("GARDE_ETAT", "/var/lib/claude-lot/garde-scopes.json"))
-INBOX = Path(os.environ.get("GARDE_INBOX", "/root/handoff/pilote_inbox/maitre.md"))
+INBOX = Path(os.environ.get("GARDE_INBOX", str(Path.home() / "handoff" / "pilote_inbox" / "maitre.md")))
 CGROUP = Path(os.environ.get("GARDE_CGROUP", "/sys/fs/cgroup/tachesclaude.slice"))
 DELAI = int(os.environ.get("GARDE_DELAI", str(2 * 3600)))
 NOM = re.compile(r"^tache-claude-\d+\.scope$")
@@ -57,7 +57,7 @@ def unites() -> list:
         return []
 
 
-SURVIVANTS = os.environ.get("CLAUDE_LOT_SURVIVANTS", "/root/projects/claude-lot/scripts/survivants.txt")
+SURVIVANTS = os.environ.get("CLAUDE_LOT_SURVIVANTS", str(Path(__file__).resolve().parent / "survivants.txt"))
 
 
 def epargnes(membres: list) -> set:

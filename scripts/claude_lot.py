@@ -21,11 +21,19 @@ Deux rôles, pour tous les projets d'une même machine :
    programme qui exécute une tâche (le « lanceur ») est un réglage : ce fichier ne connaît
    aucun projet.
 
+4. Fenêtre de 5 h inconnue et refus constatés (1.2) : quand la sonde ne connaît pas la fenêtre
+   de 5 h (« inconnu », jamais 0), le plafond de 5 h ne s'applique pas ; à la place, tout refus
+   d'usage constaté à la fin d'un lot (événement « rejected », erreur 429, « hit your … limit »)
+   est noté avec l'heure de reprise annoncée, et plus aucun lot ne démarre avant cette heure.
+   Chaque lot laisse une ligne de fin (durée, code de sortie, coût si la sortie le donne).
+
 Usage :
     claude-lot [options] -- <arguments de claude>   vérifie, choisit, lance
     claude-lot --verifier [options]                 vérifie seulement (0 ou 75)
     claude-lot --choisir [options]                  affiche le modèle choisi
     claude-lot file ajouter|lister|retirer|tourner  file de tâches (voir docs/FILE.md)
+    claude-lot refus noter [--fichier F] [--code N]  note un refus d'usage lu dans une sortie de claude
+    claude-lot refus etat                           affiche le refus en cours (code 0) ou rien (code 1)
 
 Bibliothèque standard seulement. N'affiche jamais de secret : la sonde est une
 commande externe dont seule la ligne de mesure est lue.
@@ -46,10 +54,10 @@ import sys
 import time
 import unicodedata
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 CODE_REFUS = 75  # EX_TEMPFAIL : réessayer plus tard
 CODE_USAGE = 64
@@ -61,6 +69,14 @@ REGLAGES_DEFAUT = {
     "reserve": "95",
     "rythme": "0",
     "avance": "5",
+    "sans_rythme": "",
+    "presence_projets": "",
+    "avance_absent": "",
+    "cinq_heures_absent": "",
+    "cinq_heures_present": "",
+    "presence": "/usr/local/bin/presence-antoine",
+    "turbo": "",
+    "ligne_horaire": "",
     "sonde": "",
     "sonde_delai": "120",
     "journal": "~/.local/state/claude-lot/journal.log",
@@ -68,6 +84,12 @@ REGLAGES_DEFAUT = {
     "registre": "~/.claude/modeles.json",
     "commande": "claude",
     "mesure_impossible": "lancer",
+    # Refus d'usage constatés (heure de reprise annoncée), partagés avec la sonde si elle le lit.
+    "refus": "~/.local/state/claude-lot/refus.txt",
+    # 1 : --strict-mcp-config ajouté à chaque lancement (aucun serveur MCP hors d'un --mcp-config explicite).
+    "strict_mcp": "1",
+    # Motifs des processus épargnés au nettoyage du scope (vide : survivants.txt à côté du script).
+    "survivants": "",
     # File de tâches (`claude-lot file`)
     "file": "~/.local/state/claude-lot/file.txt",
     "file_max_par_jour": "2",
@@ -165,16 +187,26 @@ def journaliser(reglages: dict, projet: str, evenement: str, detail: str) -> Non
 # ---------------------------------------------------------------- mesure
 
 SEMAINE = 604800
-MESURE = re.compile(r"^(\d+) (\d+) (\d{10}) (\d{10})$")
+MESURE = re.compile(r"^(\d+) (\d+|inconnu) (\d{10}) (\d{10})$")
+INCONNU = "inconnu"
 
 
 def lire_mesure(texte: str):
-    """« <% semaine> <% 5 h> <fin semaine epoch> <fin 5 h epoch> » -> tuple d'entiers."""
+    """« <% semaine> <% 5 h | inconnu> <fin semaine epoch> <fin 5 h epoch> » -> tuple.
+
+    Le % de la fenêtre de 5 h vaut None quand la sonde ne le connaît pas (« inconnu ») : depuis
+    le 06/11/2026, l'événement rate_limit_event de Claude Code peut ne plus porter que la semaine.
+    Une absence n'est jamais lue comme 0 %."""
     for ligne in reversed(texte.strip().splitlines()):
         m = MESURE.match(ligne.strip())
         if m:
-            return tuple(int(x) for x in m.groups())
+            u7, u5, fin7, fin5 = m.groups()
+            return int(u7), (None if u5 == INCONNU else int(u5)), int(fin7), int(fin5)
     return None
+
+
+def texte_mesure(mesure) -> str:
+    return " ".join(INCONNU if x is None else str(x) for x in mesure)
 
 
 def mesurer(reglages: dict):
@@ -185,15 +217,18 @@ def mesurer(reglages: dict):
         try:
             commande = shlex.split(sonde)
             commande[0] = os.path.expanduser(commande[0])
+            # QUOTA_FORMAT=etendu : une sonde qui le connaît écrit « inconnu » au lieu d'un 0 de
+            # compatibilité quand la fenêtre de 5 h manque ; les autres l'ignorent.
             r = subprocess.run(commande, capture_output=True, text=True,
-                               timeout=int(reglages["sonde_delai"]))
+                               timeout=int(reglages["sonde_delai"]),
+                               env={**os.environ, "QUOTA_FORMAT": "etendu"})
             mesure = lire_mesure(r.stdout) if r.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired, ValueError):
             mesure = None
         if mesure:
             try:
                 etat.parent.mkdir(parents=True, exist_ok=True)
-                etat.write_text(" ".join(map(str, mesure)) + "\n", encoding="utf-8")
+                etat.write_text(texte_mesure(mesure) + "\n", encoding="utf-8")
             except OSError:
                 pass
             return mesure, "sonde"
@@ -207,8 +242,193 @@ def mesurer(reglages: dict):
     return None, "aucune"
 
 
+# ---------------------------------------------------------------- refus d'usage constatés
+
+REFUS_DEFAUT = 1800  # heure de reprise illisible : on réessaie dans 30 min (un nouveau refus prolonge)
+LIMITE_TEXTE = re.compile(r"hit your (?:[a-z]+ )?limit|usage limit reached|(?:5-hour|session|weekly) limit\b", re.I)
+LIMITE_LIGNE = re.compile(r"^(?:error:\s*)?(?:you'?ve hit your|you have hit your|claude ai usage limit reached"
+                          r"|api error:\s*429)", re.I)
+REPRISE_TEXTE = re.compile(
+    r"resets\s+(?:(?P<mois>[A-Za-z]{3,9})\.?\s+(?P<jour>\d{1,2}),?\s+(?:at\s+)?)?"
+    r"(?P<h>\d{1,2})(?::(?P<mi>\d{2}))?\s*(?P<ap>am|pm)\b(?:\s*\((?P<tz>[A-Za-z_]+(?:/[A-Za-z_+-]+)*)\))?",
+    re.I)
+MOIS = {m: i + 1 for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun",
+                                         "jul", "aug", "sep", "oct", "nov", "dec"))}
+
+
+def heure_de_reprise(texte: str, t: int):
+    """Heure de reprise (epoch) annoncée dans un message de limite de Claude Code, ou None.
+    Formes reconnues : « …|1793869200 », « resets 9:50pm (Europe/Paris) », « resets 5am »,
+    « resets Nov 9, 8pm (Europe/Paris) ». Sans date : la prochaine occurrence de l'heure."""
+    m = re.search(r"limit reached\|(\d{10})", texte)
+    if m:
+        return int(m.group(1))
+    m = REPRISE_TEXTE.search(texte)
+    if not m:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(m["tz"]) if m["tz"] else None
+    except Exception:
+        tz = None
+    tz = tz or datetime.now().astimezone().tzinfo
+    h = int(m["h"]) % 12 + (12 if m["ap"].lower() == "pm" else 0)
+    mi = int(m["mi"] or 0)
+    if h > 23 or mi > 59:
+        return None
+    ici = datetime.fromtimestamp(t, tz)
+    if m["mois"]:
+        mois = MOIS.get(m["mois"][:3].lower())
+        if not mois:
+            return None
+        try:
+            d = datetime(ici.year, mois, int(m["jour"]), h, mi, tzinfo=tz)
+        except ValueError:
+            return None
+        if d.timestamp() < t - 86400:
+            d = d.replace(year=ici.year + 1)
+    else:
+        d = ici.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if d.timestamp() <= t:
+            d += timedelta(days=1)
+    return int(d.timestamp())
+
+
+def type_de_limite(texte: str) -> str:
+    bas = texte.lower()
+    if "session" in bas or "5-hour" in bas or "five_hour" in bas:
+        return "five_hour"
+    if "weekly" in bas or "seven_day" in bas:
+        return "seven_day"
+    return "inconnu"
+
+
+def detecter_refus(texte: str, code, t: int):
+    """(fin epoch, type) si la sortie d'un `claude` montre un refus d'usage, sinon None.
+
+    Il faut une preuve d'échec : résultat final en erreur (« is_error »), ou code de sortie non nul
+    avec un message de limite sur une des dernières lignes. Un événement rate_limit_event « rejected »
+    seul (par exemple une limite propre à un modèle, avec repli) ne suffit pas ; il sert à dater la
+    reprise. Le texte produit par le lot lui-même n'est jamais lu comme un refus."""
+    rejets, echec, fin_texte, quoi = [], False, None, "inconnu"
+    for ligne in texte.splitlines():
+        s = ligne.strip()
+        if not s.startswith("{"):
+            continue
+        try:
+            ev = json.loads(s)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "rate_limit_event":
+            info = ev.get("rate_limit_info") or {}
+            if info.get("status") == "rejected" and str(info.get("resetsAt", "")).isdigit():
+                rejets.append((int(info["resetsAt"]), str(info.get("rateLimitType") or "inconnu")))
+            for nom, fen in (info.get("unifiedWindows") or {}).items():
+                if isinstance(fen, dict) and fen.get("status") == "rejected" and str(fen.get("resetsAt", "")).isdigit():
+                    rejets.append((int(fen["resetsAt"]), str(nom)))
+        elif ev.get("type") == "result" and ev.get("is_error"):
+            resultat = str(ev.get("result") or "")
+            if ev.get("api_error_status") == 429 or LIMITE_TEXTE.search(resultat):
+                echec, fin_texte, quoi = True, heure_de_reprise(resultat, t), type_de_limite(resultat)
+    if not echec and code not in (0, None):
+        dernieres = [l.strip() for l in texte.splitlines() if l.strip()][-5:]
+        for l in dernieres:
+            if LIMITE_LIGNE.search(l):
+                echec, fin_texte, quoi = True, heure_de_reprise(l, t), type_de_limite(l)
+                break
+    if not echec:
+        return None
+    futurs = [r for r in rejets if r[0] > t]
+    if futurs:
+        fin, nom = max(futurs)
+        return fin, (nom if quoi == "inconnu" else quoi)
+    if fin_texte and fin_texte > t:
+        return fin_texte, quoi
+    return t + REFUS_DEFAUT, quoi
+
+
+def lire_refus(reglages: dict):
+    """(fin, type, source) du refus en cours (fin dans le futur), sinon None.
+    Fichier : une ligne « <fin epoch> <type> <source> <date> »."""
+    chemin = reglages.get("refus", "")
+    if not chemin:
+        return None
+    try:
+        champs = chemin_local(chemin).read_text(encoding="utf-8").split()
+    except OSError:
+        return None
+    if len(champs) >= 2 and champs[0].isdigit() and int(champs[0]) > maintenant():
+        return int(champs[0]), champs[1], (champs[2] if len(champs) > 2 else "?")
+    return None
+
+
+def noter_refus(reglages: dict, projet: str, fin: int, quoi: str, source: str) -> int:
+    """Note un refus ; garde l'heure de reprise la plus lointaine. Rend la fin retenue."""
+    chemin = reglages.get("refus", "")
+    if not chemin:
+        return fin
+    actuel = lire_refus(reglages)
+    if actuel and actuel[0] >= fin:
+        fin, quoi, source = actuel
+    f = chemin_local(chemin)
+    reprise = datetime.fromtimestamp(fin).astimezone().isoformat(timespec="seconds")
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_name(f.name + ".tmp")
+        tmp.write_text(f"{fin} {quoi} {re.sub(r'[^A-Za-z0-9_.-]', '_', source) or '?'} {reprise}\n", encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, f)
+    except OSError:
+        sys.stderr.write("claude-lot : refus impossible à noter\n")
+    journaliser(reglages, projet, "refus-constate", f"type={quoi} reprise={reprise} source={source}")
+    return fin
+
+
+def presence(reglages: dict) -> str | None:
+    """« present », « absent », ou None si l'outil de présence ne répond pas (aucun effet)."""
+    try:
+        r = subprocess.run(shlex.split(os.path.expanduser(reglages["presence"])), capture_output=True,
+                           text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    sortie = r.stdout.strip().split()
+    return sortie[0] if sortie and sortie[0] in ("present", "absent") else None
+
+
+def ecoule_horaire(reglages: dict, debut: int, fin: int, t: int):
+    """Part pondérée de la semaine écoulée (0 à 100) selon l'emploi du temps, ou None (ligne droite)."""
+    outil = reglages.get("ligne_horaire", "")
+    if not outil:
+        return None
+    try:
+        r = subprocess.run(shlex.split(os.path.expanduser(outil)) + ["ligne", str(debut), str(fin), "--a", str(t)],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    v = r.stdout.strip()
+    return min(100, int(v) // 10) if r.returncode == 0 and v.isdigit() else None
+
+
+def turbo_actif(reglages: dict) -> bool:
+    """TURBO : seulement sur demande expresse d'Antoine (CLAUDE_LOT_TURBO=1 ou fichier « turbo » présent)."""
+    if os.environ.get("CLAUDE_LOT_TURBO") == "1":
+        return True
+    chemin = reglages.get("turbo", "")
+    return bool(chemin) and chemin_local(chemin).exists()
+
+
 def verifier(reglages: dict, prioritaire: bool, projet: str, sujet: str):
     """Renvoie (autorisé, message)."""
+    # Refus d'usage constaté plus tôt (fenêtre de 5 h ou semaine pleine) : plus rien ne part avant
+    # l'heure de reprise annoncée, même en --prioritaire (le compte refuserait de toute façon).
+    refus = lire_refus(reglages)
+    if refus:
+        fin, quoi, _source = refus
+        reprise = datetime.fromtimestamp(fin).astimezone().strftime("%d/%m %H:%M")
+        journaliser(reglages, projet, "refus", f"limite-constatee type={quoi} reprise={reprise} sujet={sujet[:60]!r}")
+        return False, (f"limite d'usage constatée ({quoi}), rien lancé ; reprise possible après le {reprise}")
     mesure, origine = mesurer(reglages)
     if mesure is None:
         if reglages["mesure_impossible"] == "refuser":
@@ -219,7 +439,7 @@ def verifier(reglages: dict, prioritaire: bool, projet: str, sujet: str):
         return True, "mesure du quota impossible, lancement autorisé (mesure_impossible=lancer)"
     u7, u5, fin7, fin5 = mesure
     t = maintenant()
-    if t >= fin5:
+    if u5 is not None and t >= fin5:
         u5 = 0
     if t >= fin7:
         u7 = 0
@@ -227,22 +447,53 @@ def verifier(reglages: dict, prioritaire: bool, projet: str, sujet: str):
         p5 = p7 = int(reglages["reserve"])
     else:
         p5, p7 = int(reglages["cinq_heures"]), int(reglages["semaine"])
-    # Rythme : la semaine ne se dépense pas plus vite que la ligne régulière
-    # (temps écoulé depuis la remise à zéro / 7 jours x plafond, + avance).
-    # Sans effet pour --prioritaire.
+    avance = int(reglages["avance"])
+    # Présence d'Antoine (27/10/2026, règle commune à toutes les files) : seulement pour les projets de
+    # presence_projets, jamais en --prioritaire ; chaque clé absente est sans effet.
+    #   absent  : avance + avance_absent sur la ligne, fenêtre de 5 h à cinq_heures_absent % ;
+    #   présent : fenêtre de 5 h à cinq_heures_present % au plus (ses sessions gardent le reste) ;
+    #   TURBO   : le plafond « présent » est levé (la fenêtre de 5 h reste à cinq_heures %).
+    qui = ""
+    suivis = {x.strip() for x in reglages.get("presence_projets", "").split(",") if x.strip()}
+    if not prioritaire and projet in suivis:
+        qui = presence(reglages) or ""
+        turbo = turbo_actif(reglages)
+        if qui == "absent":
+            if reglages.get("avance_absent", "").isdigit():
+                avance += int(reglages["avance_absent"])
+            if reglages.get("cinq_heures_absent", "").isdigit():
+                p5 = int(reglages["cinq_heures_absent"])
+        elif qui == "present" and not turbo and reglages.get("cinq_heures_present", "").isdigit():
+            p5 = min(p5, int(reglages["cinq_heures_present"]))
+        qui = f" antoine={qui or 'inconnu'}{' TURBO' if turbo else ''}"
+    # Rythme (21/10/2026) : la semaine ne se dépense pas plus vite que la ligne régulière
+    # (temps écoulé depuis la remise à zéro / 7 jours x plafond, + avance). Même formule
+    # que la file Vuntum (quota-part.txt). Sans effet pour --prioritaire.
     ligne = False
-    if not prioritaire and reglages["rythme"] == "1":
+    # sans_rythme (27/10/2026) : projets exemptés de la ligne, liste séparée par des virgules (motpop, sur demande
+    # d'Antoine) ; les plafonds 5 h et semaine s'appliquent toujours.
+    exemptes = {x.strip() for x in reglages.get("sans_rythme", "").split(",") if x.strip()}
+    if not prioritaire and reglages["rythme"] == "1" and projet not in exemptes:
         ecoule = min(100, max(0, (t - (fin7 - SEMAINE)) * 100 // SEMAINE))
-        p7 = min(p7, ecoule * p7 // 100 + int(reglages["avance"]))
+        # Ligne pondérée par l'emploi du temps (04/11/2026, /etc/emploi-du-temps.conf) : elle monte vite
+        # la nuit, le dimanche et le lundi, lentement pendant les heures de travail d'Antoine.
+        # Outil absent ou muet : ligne droite.
+        pondere = ecoule_horaire(reglages, fin7 - SEMAINE, fin7, t)
+        if pondere is not None:
+            ecoule = pondere
+        p7 = min(p7, ecoule * p7 // 100 + avance)
         ligne = True
-    etat = f"5h={u5}%/{p5}% semaine={u7}%/{p7}%{' (ligne régulière)' if ligne else ''} ({origine})"
-    if u5 >= p5 or u7 >= p7:
-        fin = fin5 if u5 >= p5 else fin7
-        quoi = "la fenêtre de 5 h" if u5 >= p5 else "la semaine"
-        if ligne and u5 < p5 and u7 < int(reglages["semaine"]):
+    # Fenêtre de 5 h inconnue : pas de plafond de 5 h (les refus constatés le remplacent, voir plus haut).
+    plein5 = u5 is not None and u5 >= p5
+    etat = (f"5h={INCONNU if u5 is None else f'{u5}%'}/{p5}% semaine={u7}%/{p7}%"
+            f"{' (ligne régulière)' if ligne else ''}{qui} ({origine})")
+    if plein5 or u7 >= p7:
+        fin = fin5 if plein5 else fin7
+        quoi = "la fenêtre de 5 h" if plein5 else "la semaine"
+        if ligne and not plein5 and u7 < int(reglages["semaine"]):
             # La ligne rattrape l'usage : fraction de semaine à attendre pour que repère > usage.
             quoi = "la ligne régulière de la semaine"
-            plafond, avance = int(reglages["semaine"]), int(reglages["avance"])
+            plafond = int(reglages["semaine"])
             besoin = -(-(u7 - avance + 1) * 100 // plafond)
             fin = fin7 - SEMAINE + -(-besoin * SEMAINE // 100)
         reprise = datetime.fromtimestamp(fin).astimezone().strftime("%d/%m %H:%M")
@@ -706,6 +957,40 @@ def main_file(argv) -> int:
     return file_tourner(reglages, a.a_blanc, getattr(a, "conf", None) or os.environ.get("CLAUDE_LOT_CONF"))
 
 
+# ---------------------------------------------------------------- refus (commande)
+
+def main_refus(argv) -> int:
+    """`claude-lot refus noter` : lit une sortie de claude (fichier ou entrée standard) et note le
+    refus d'usage qu'elle montre (code 0, affiche « <fin epoch> <type> »), sinon code 1.
+    `claude-lot refus etat` : affiche le refus en cours (code 0) ou rien (code 1)."""
+    p = argparse.ArgumentParser(prog="claude-lot refus")
+    p.add_argument("action", choices=("noter", "etat"))
+    p.add_argument("--fichier", help="sortie de claude à lire (défaut : entrée standard)")
+    p.add_argument("--code", type=int, default=1, help="code de sortie de claude (défaut 1)")
+    p.add_argument("--source", default="externe", help="qui note le refus (journal)")
+    p.add_argument("--projet", default="", help="nom du projet, pour le journal")
+    p.add_argument("--conf", help=f"fichier de réglages (défaut {CONF_DEFAUT} ou $CLAUDE_LOT_CONF)")
+    a = p.parse_args(argv)
+    reglages = lire_reglages(a.conf)
+    if a.action == "etat":
+        refus = lire_refus(reglages)
+        if not refus:
+            return 1
+        print(f"{refus[0]} {refus[1]} {refus[2]}")
+        return 0
+    try:
+        texte = Path(a.fichier).read_text(encoding="utf-8", errors="replace") if a.fichier else sys.stdin.read()
+    except OSError:
+        sys.stderr.write("claude-lot refus : sortie illisible\n")
+        return CODE_USAGE
+    refus = detecter_refus(texte, a.code, maintenant())
+    if not refus:
+        return 1
+    fin = noter_refus(reglages, a.projet, refus[0], refus[1], a.source)
+    print(f"{fin} {refus[1]}")
+    return 0
+
+
 # ---------------------------------------------------------------- entrée
 
 def analyser(argv):
@@ -725,6 +1010,16 @@ def analyser(argv):
     if a.args and a.args[0] == "--":
         a.args = a.args[1:]
     return a
+
+
+def pause_disque() -> str:
+    """Contrôle d'entrée commun (05/11/2026, GO d'Antoine) : /usr/local/bin/pause-disque
+    répond 0 quand le disque système dépasse 90 % ou le volume 95 %. Absent ou en échec : pas de pause."""
+    try:
+        r = subprocess.run(["/usr/local/bin/pause-disque"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 SCOPE_LOT = re.compile(r"^(/.*)?/tachesclaude\.slice/(tache-claude-\d+\.scope)$")
@@ -752,20 +1047,23 @@ def pids_du_scope(scope: str) -> list:
     return [int(p) for p in texte.split() if p.isdigit() and int(p) != os.getpid()]
 
 
-SURVIVANTS = os.environ.get("CLAUDE_LOT_SURVIVANTS", "/root/projects/claude-lot/scripts/survivants.txt")
+def fichier_survivants(reglages: dict | None = None) -> Path:
+    """CLAUDE_LOT_SURVIVANTS, sinon le réglage `survivants`, sinon survivants.txt à côté du script."""
+    chemin = os.environ.get("CLAUDE_LOT_SURVIVANTS") or (reglages or {}).get("survivants", "")
+    return chemin_local(chemin) if chemin else Path(__file__).resolve().parent / "survivants.txt"
 
 
-def motifs_survivants() -> list:
+def motifs_survivants(reglages: dict | None = None) -> list:
     try:
-        return [re.compile(l.strip()) for l in Path(SURVIVANTS).read_text(encoding="utf-8").splitlines()
+        return [re.compile(l.strip()) for l in fichier_survivants(reglages).read_text(encoding="utf-8").splitlines()
                 if l.strip() and not l.lstrip().startswith("#")]
     except (OSError, re.error):
         return []
 
 
-def epargnes(pids: list) -> set:
+def epargnes(pids: list, reglages: dict | None = None) -> set:
     """Pids dont la ligne de commande, ou celle d'un ancêtre, correspond à un survivant autorisé."""
-    motifs = motifs_survivants()
+    motifs = motifs_survivants(reglages)
 
     def ligne(p):
         try:
@@ -794,7 +1092,7 @@ def nettoyer_scope(reglages: dict, projet: str, scope: str, delai: int = 30) -> 
     (TERM, puis KILL après `delai` s) et journalise. Ne touche à aucun autre cgroup."""
     import signal
     restes = pids_du_scope(scope)
-    sauves = epargnes(restes)
+    sauves = epargnes(restes, reglages)
     restes = [p for p in restes if p not in sauves]
     if not restes:
         return
@@ -828,10 +1126,55 @@ def nettoyer_scope(reglages: dict, projet: str, scope: str, delai: int = 30) -> 
                 + " ".join(f"{p}:{decrit[p]!r}" for p in restes))
 
 
-def executer_lot(reglages: dict, projet: str, commande: list) -> int:
-    """Lance claude en processus fils (au lieu d'exec), attend sa fin, puis nettoie le scope du lot."""
-    import signal
-    proc = subprocess.Popen(commande)
+QUEUE_LUE = 1 << 20  # derniers octets gardés de chaque sortie (refus, coût)
+COUT = re.compile(r'"total_cost_usd"\s*:\s*([0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)')
+
+
+def relayer_sortie(source, cible: int, queue: bytearray) -> None:
+    """Recopie une sortie du lot vers la nôtre, sans tampon, en gardant ses derniers octets.
+    Si notre lecteur ferme (tube cassé), on ferme aussi la lecture : le lot reçoit SIGPIPE comme
+    s'il écrivait directement."""
+    fd = source.fileno()
+    while True:
+        try:
+            bloc = os.read(fd, 65536)
+        except OSError:
+            break
+        if not bloc:
+            break
+        queue += bloc
+        if len(queue) > QUEUE_LUE:
+            del queue[:-QUEUE_LUE]
+        vue = memoryview(bloc)
+        try:
+            while vue:
+                vue = vue[os.write(cible, vue):]
+        except OSError:
+            break
+    try:
+        source.close()
+    except OSError:
+        pass
+
+
+def executer_lot(reglages: dict, projet: str, commande: list, sujet: str = "") -> int:
+    """Lance claude en processus fils (au lieu d'exec), attend sa fin, puis nettoie le scope du lot.
+
+    Les sorties non reliées à un terminal sont recopiées telles quelles et leurs derniers octets lus
+    à la fin : refus d'usage (noté, voir detecter_refus) et coût (« total_cost_usd », sorties json et
+    stream-json). Une ligne « fin-lot » (durée, code, coût) part dans le journal."""
+    import threading
+    debut = time.monotonic()
+    tuyaux = {fd: not os.isatty(fd) for fd in (1, 2)}
+    proc = subprocess.Popen(commande, stdout=subprocess.PIPE if tuyaux[1] else None,
+                            stderr=subprocess.PIPE if tuyaux[2] else None)
+    queues = {1: bytearray(), 2: bytearray()}
+    fils = []
+    for fd, flux in ((1, proc.stdout), (2, proc.stderr)):
+        if flux is not None:
+            th = threading.Thread(target=relayer_sortie, args=(flux, fd, queues[fd]), daemon=True)
+            th.start()
+            fils.append(th)
     scope = None
 
     def relayer(signum, _frame):
@@ -840,7 +1183,10 @@ def executer_lot(reglages: dict, projet: str, commande: list) -> int:
         except OSError:
             pass
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(s, relayer)
+        try:
+            signal.signal(s, relayer)
+        except ValueError:  # pas le fil principal (tests)
+            pass
     while True:
         try:
             code = proc.wait(timeout=0.25)
@@ -850,18 +1196,41 @@ def executer_lot(reglages: dict, projet: str, commande: list) -> int:
         finally:
             if scope is None:
                 scope = scope_de(proc.pid)
+    code = code if code >= 0 else 128 - code
     if scope is not None:
         try:
             nettoyer_scope(reglages, projet, scope)
         except Exception as e:  # le nettoyage ne doit jamais changer le code de sortie du lot
             journaliser(reglages, projet, "scope-erreur", repr(e)[:200])
-    return code if code >= 0 else 128 - code
+    # Après le nettoyage (qui arrête les orphelins du scope) : un descendant détaché qui garde la
+    # sortie ouverte ne bloque pas plus de 10 s ; il la perd à notre sortie (survivants.txt : les
+    # lancements détachés autorisés redirigent leur sortie vers un fichier).
+    for th in fils:
+        th.join(timeout=10)
+    if any(th.is_alive() for th in fils):
+        journaliser(reglages, projet, "sortie-encore-ouverte", "un descendant du lot garde stdout ou stderr ouvert")
+    try:
+        sortie = queues[1].decode("utf-8", errors="replace")
+        texte = sortie + "\n" + queues[2].decode("utf-8", errors="replace")
+        couts = COUT.findall(sortie)
+        cout = f"{float(couts[-1]):.4f}$" if couts else "inconnu"
+        refus = detecter_refus(texte, code, maintenant())
+        detail = f"duree={int(time.monotonic() - debut)}s code={code} cout={cout}"
+        if refus:
+            fin = noter_refus(reglages, projet, refus[0], refus[1], f"lot-{projet or 'sans-projet'}")
+            detail += f" refus={refus[1]} reprise={datetime.fromtimestamp(fin).astimezone().isoformat(timespec='seconds')}"
+        journaliser(reglages, projet, "fin-lot", f"{detail} sujet={sujet[:60]!r}")
+    except Exception as e:  # le bilan ne doit jamais changer le code de sortie du lot
+        journaliser(reglages, projet, "fin-lot-erreur", repr(e)[:200])
+    return code
 
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "file":
         return main_file(argv[1:])
+    if argv and argv[0] == "refus":
+        return main_refus(argv[1:])
     a = analyser(argv)
     if a.args and a.args[0] == "file" and "--" not in argv:
         # « claude-lot --conf X file tourner » : la file, jamais un lancement de claude.
@@ -882,6 +1251,11 @@ def main(argv=None) -> int:
         print(f"{modele} {effort} ({raison})")
         return 0
 
+    pause = pause_disque()
+    if pause:
+        journaliser(reglages, a.projet, "refus", f"pause disque : {pause} sujet={sujet[:60]!r}")
+        sys.stderr.write(f"claude-lot : disque presque plein ({pause}), aucun nouveau lot\n")
+        return CODE_REFUS
     autorise, message = verifier(reglages, a.prioritaire, a.projet, sujet)
     if not autorise:
         sys.stderr.write(f"claude-lot : {message}\n")
@@ -901,10 +1275,25 @@ def main(argv=None) -> int:
         raison = "modèle imposé par la commande"
     if "--effort" not in a.args:
         ajout += ["--effort", effort]
+    else:
+        i = a.args.index("--effort")
+        if i + 1 < len(a.args):
+            effort = a.args[i + 1]
+    # Effort des sous-agents (05/11/2026, audit des coûts) : ~/.claude/settings.json fixe
+    # CLAUDE_CODE_SUBAGENT_EFFORT=medium pour les sous-agents sans type ; un lot transmet le sien,
+    # par l'environnement et par --settings (prioritaire sur les réglages utilisateur).
+    # Si le lot impose déjà ses propres --settings, seule la variable d environnement est posée.
+    os.environ["CLAUDE_CODE_SUBAGENT_EFFORT"] = effort
+    if "--settings" not in a.args:
+        ajout += ["--settings", json.dumps({"env": {"CLAUDE_CODE_SUBAGENT_EFFORT": effort}})]
+    # Aucun serveur MCP dans un lot (08/11/2026, audit : un serveur global par `claude -p`, ~25 Mo et un
+    # processus chacun, définitions d'outils dans le contexte). Un --mcp-config explicite reste servi.
+    if reglages.get("strict_mcp", "1") == "1" and "--strict-mcp-config" not in a.args:
+        ajout.append("--strict-mcp-config")
     journaliser(reglages, a.projet, "lancement",
                 f"{message} modele={modele if '--model' not in a.args else 'commande'} effort={effort} ({raison}) sujet={sujet[:60]!r}")
     sys.stdout.flush()
-    return executer_lot(reglages, a.projet, commande + ajout + a.args)
+    return executer_lot(reglages, a.projet, commande + ajout + a.args, sujet)
 
 
 if __name__ == "__main__":
