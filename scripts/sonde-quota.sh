@@ -28,7 +28,7 @@ fi
 DELAI="$(command -v timeout || command -v gtimeout || true)"
 FLUX="$(mktemp)"; trap 'rm -f "$FLUX"' EXIT
 (cd "${TMPDIR:-/tmp}" && CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
-  ${DELAI:+$DELAI 90} claude -p "Réponds OK." --model "$MODELE" --tools "" --strict-mcp-config \
+  ${DELAI:+$DELAI 90} claude -p "Réponds OK." --model "$MODELE" --effort low --tools "" --strict-mcp-config \
     --output-format stream-json --verbose 2>/dev/null > "$FLUX")
 CODE=$?
 if [[ "$(claude-lot --version 2>/dev/null)" =~ ^claude-lot\ (1\.([2-9]|[1-9][0-9])|[2-9])\. ]]; then
